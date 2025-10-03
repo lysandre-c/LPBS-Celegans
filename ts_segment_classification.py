@@ -41,7 +41,9 @@ class LSTMClassifier(nn.Module):
     def forward(self, x):
         # LSTM expects (batch, sequence_length, features)
         # If input is transposed for CNN, we need to transpose it back
-        if x.dim() == 3 and x.size(1) > x.size(2):  # Check if it's CNN format
+        # CNN format: (batch, features, seq_len) where features=4 and seq_len=900
+        # LSTM format: (batch, seq_len, features) where seq_len=900 and features=4
+        if x.dim() == 3 and x.size(1) == 4 and x.size(2) > x.size(1):  # Check if it's CNN format (batch, 4, 900)
             x = x.transpose(1, 2)  # Convert from (batch, features, seq_len) to (batch, seq_len, features)
         
         lstm_out, (hidden, cell) = self.lstm(x)
@@ -139,14 +141,16 @@ def weighted_voting_classification(model, weight_strategy='confidence', epochs=2
     base_groups = np.array(base_groups)
     
     # Pad/truncate time series to same length for PyTorch
-    min_length = min(len(ts) for ts in X)
+    target_length = 300  
     X_padded = []
     for ts in X:
-        if len(ts) >= min_length:
-            X_padded.append(ts[:min_length])
+        if len(ts) >= target_length:
+            # Sample evenly spaced indices to downsample to target_length
+            indices = np.linspace(0, len(ts) - 1, target_length, dtype=int)
+            X_padded.append(ts[indices])
         else:
             # Pad with zeros if needed
-            padded = np.zeros((min_length, ts.shape[1]))
+            padded = np.zeros((target_length, ts.shape[1]))
             padded[:len(ts)] = ts
             X_padded.append(padded)
     X_padded = np.array(X_padded)
