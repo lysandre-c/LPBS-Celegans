@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import re
+from imblearn.over_sampling import SMOTE
 
 from data_loader import LPBSDataLoader
 
@@ -15,28 +16,45 @@ from data_loader import LPBSDataLoader
 class CNNClassifier(nn.Module):
     def __init__(self, input_size):
         super(CNNClassifier, self).__init__()
-        self.conv1 = nn.Conv1d(input_size, 128, kernel_size=3, stride=1, padding=1)
-        self.relu1 = nn.ReLU()
-        self.conv2 = nn.Conv1d(128, 256, kernel_size=3, stride=1, padding=1)
-        self.relu2 = nn.ReLU()
+        self.input_size = input_size
+        self.conv_layers = nn.Sequential(
+            nn.Conv1d(input_size, 32, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Conv1d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Conv1d(64, 256, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Dropout(0.2)
+        )
         self.global_avg_pool = nn.AdaptiveAvgPool1d(1)
-        self.fc1 = nn.Linear(256, 2)
-        
+        self.fc_layers = nn.Sequential(
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 2)
+        )
+
     def forward(self, x):
-        x = self.conv1(x)
-        x = self.relu1(x)
-        x = self.conv2(x)
-        x = self.relu2(x)
-        x = self.global_avg_pool(x)  # Global average pooling to handle variable lengths
-        x = x.view(x.size(0), -1)   # Flatten
-        x = self.fc1(x)
+        x = self.conv_layers(x)
+        x = self.global_avg_pool(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc_layers(x)
         return x
 
 class LSTMClassifier(nn.Module):
     def __init__(self, input_size):
         super(LSTMClassifier, self).__init__()
-        self.lstm = nn.LSTM(input_size, 128, num_layers=2, batch_first=True)
-        self.fc1 = nn.Linear(128, 2)
+        self.input_size = input_size
+        self.lstm = nn.LSTM(input_size, 64, num_layers=2, batch_first=True, dropout=0.2)
+        self.dropout = nn.Dropout(0.3)
+        self.fc1 = nn.Linear(64, 32)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(32, 2)
         
     def forward(self, x):
         # LSTM expects (batch, sequence_length, features)
@@ -47,9 +65,12 @@ class LSTMClassifier(nn.Module):
             x = x.transpose(1, 2)  # Convert from (batch, features, seq_len) to (batch, seq_len, features)
         
         lstm_out, (hidden, cell) = self.lstm(x)
-        # Use the last hidden state for classification
-        x = hidden[-1]  # Take the last layer's hidden state
+        x = hidden[-1]  # Use the last hidden state for classification
+        x = self.dropout(x)
         x = self.fc1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
         return x
 
 def calculate_segment_weights(weight_strategy, n_segments, segment_probs):
@@ -89,7 +110,6 @@ def calculate_segment_weights(weight_strategy, n_segments, segment_probs):
     
     return weights
 
-
 def get_model(model_name: str, input_size):
     """Get PyTorch models for time series classification."""
     if model_name == 'CNN':
@@ -98,8 +118,6 @@ def get_model(model_name: str, input_size):
         return LSTMClassifier(input_size)
     else:
         raise ValueError(f"Unknown model name: {model_name}")
-
-
 
 def pytorch_accuracy(y_true, y_pred):
     """Calculate accuracy using numpy."""
@@ -125,23 +143,52 @@ def pytorch_confusion_matrix(y_true, y_pred):
     return np.array([[tn, fp], [fn, tp]])
 
 
-def weighted_voting_classification(model, weight_strategy='confidence', epochs=25, batch_size=32, learning_rate=0.001, verbose=False):
-    """Weighted voting classifier using pure PyTorch."""
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def weighted_voting_classification(model, weight_strategy='confidence', epochs=25, batch_size=32, learning_rate=0.001, features=None, verbose=False):
+    """Weighted voting classifier using pure PyTorch.
+    
+    Args:
+        model: PyTorch model instance (CNN or LSTM).
+        weight_strategy: Strategy for weighting segments during voting.
+        epochs: Number of training epochs per fold.
+        batch_size: Batch size for training.
+        learning_rate: Learning rate for optimizer.
+        features: List of feature names to use. Options: ['x', 'y', 'speed', 'turning_angle'].
+                  If None, uses all features. Example: ['speed', 'turning_angle']
+        verbose: Whether to print progress information.
+    
+    Returns:
+        dict: Results including accuracy, F1, confusion matrix, and vote analysis.
+    """
+    # Feature mapping
+    FEATURE_MAP = {'x': 0, 'y': 1, 'speed': 2, 'turning_angle': 3}
+    ALL_FEATURES = ['x', 'y', 'speed', 'turning_angle']
+    
+    # Use MPS (Apple Silicon GPU) if available, otherwise CUDA, otherwise CPU
+    if torch.backends.mps.is_available():
+        device = torch.device('mps')
+    elif torch.cuda.is_available():
+        device = torch.device('cuda')
+    else:
+        device = torch.device('cpu')
+    
+    if verbose:
+        print(f"Using device: {device}")
     
     loader = LPBSDataLoader()
     X, y, groups = loader.load_segment_timeseries()
     
-    # Extract base worm names from segment filenames for proper grouping
-    base_groups = []
-    for filename in groups:
-        # Extract base worm name by removing segment info
-        base_name = re.sub(r'-segment\d+\.0-preprocessed\.csv$', '', filename)
-        base_groups.append(base_name)
-    base_groups = np.array(base_groups)
+    # Select features if specified
+    if features is not None:
+        if verbose:
+            print(f"Selected features: {features}")
+        feature_indices = [FEATURE_MAP[f] for f in features]
+        X = [ts[:, feature_indices] for ts in X]
+    else:
+        if verbose:
+            print(f"Using all features: {ALL_FEATURES}")
     
-    # Pad/truncate time series to same length for PyTorch
-    target_length = 300  
+    # Pad/truncate time series to same length
+    target_length = 100  
     X_padded = []
     for ts in X:
         if len(ts) >= target_length:
@@ -156,17 +203,17 @@ def weighted_voting_classification(model, weight_strategy='confidence', epochs=2
     X_padded = np.array(X_padded)
     
     if verbose:
-        print(f"Loaded: {len(X):,} segments from {len(np.unique(base_groups))} worms")
+        print(f"Loaded: {len(X):,} segments from {len(np.unique(groups))} worms")
         print(f"Padded shape: {X_padded.shape}")
         print(f"Weight strategy: {weight_strategy}")
 
     # Convert to pandas for cv_splits compatibility
     y_series = pd.Series(y)
-    base_groups_series = pd.Series(base_groups)
+    groups_series = pd.Series(groups)
     
     # Create dummy DataFrame with indices for cv_splits
     X_df = pd.DataFrame({'dummy': range(len(X_padded))})
-    cv_splits = loader.create_cv_splits(X_df, y_series, base_groups_series, n_splits=5)
+    cv_splits = loader.create_cv_splits(X_df, y_series, groups_series, n_splits=5)
     
     file_predictions, file_true_labels = [], []
     vote_analysis = []
@@ -184,16 +231,36 @@ def weighted_voting_classification(model, weight_strategy='confidence', epochs=2
         y_train = y[train_indices]
         y_test = y[test_indices]
         
+        # Apply SMOTE to balance the training data
+        if verbose and fold_idx == 0:
+            print(f"  Before SMOTE - Class distribution: {np.bincount(y_train)}")
+        
+        # Flatten time series for SMOTE (SMOTE needs 2D data)
+        n_samples, n_timesteps, n_features = X_train.shape
+        X_train_flat = X_train.reshape(n_samples, n_timesteps * n_features)
+        
+        # Apply SMOTE
+        smote = SMOTE(random_state=42)
+        X_train_balanced, y_train_balanced = smote.fit_resample(X_train_flat, y_train)
+        
+        # Reshape back to time series format
+        X_train_balanced = X_train_balanced.reshape(-1, n_timesteps, n_features)
+        
+        if verbose and fold_idx == 0:
+            print(f"  After SMOTE - Class distribution: {np.bincount(y_train_balanced)}")
+            print(f"  Samples: {len(y_train)} → {len(y_train_balanced)}")
+        
         # Convert to PyTorch tensors
         # For CNN: (batch, features, sequence_length) 
         # For LSTM: (batch, sequence_length, features) - handled in LSTM forward()
-        X_train_tensor = torch.FloatTensor(X_train).transpose(1, 2).to(device)
+        X_train_tensor = torch.FloatTensor(X_train_balanced).transpose(1, 2).to(device)
         X_test_tensor = torch.FloatTensor(X_test).transpose(1, 2).to(device)
-        y_train_tensor = torch.LongTensor(y_train).to(device)
+        y_train_tensor = torch.LongTensor(y_train_balanced).to(device)
         
-        # Reset model for each fold
-        model.to(device)
-        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        # Re-initialize model for each fold (CRITICAL!)
+        fold_model = type(model)(model.input_size)
+        fold_model.to(device)
+        optimizer = torch.optim.Adam(fold_model.parameters(), lr=learning_rate)
         criterion = nn.CrossEntropyLoss()
         
         # Create DataLoader for training
@@ -201,24 +268,25 @@ def weighted_voting_classification(model, weight_strategy='confidence', epochs=2
         train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         
         # Train the model
-        model.train()
+        fold_model.train()
         for epoch in range(epochs):
             epoch_loss = 0
             for batch_X, batch_y in train_dataloader:
                 optimizer.zero_grad()
-                outputs = model(batch_X)
+                outputs = fold_model(batch_X)
                 loss = criterion(outputs, batch_y)
                 loss.backward()
                 optimizer.step()
                 epoch_loss += loss.item()
             
-            if verbose and epoch % 10 == 0:
+            # Show progress every 10 epochs
+            if verbose and (epoch % 10 == 0 or epoch == epochs - 1):
                 print(f"  Epoch {epoch}, Loss: {epoch_loss/len(train_dataloader):.4f}")
         
         # Test on each worm in the test split
-        model.eval()
+        fold_model.eval()
         with torch.no_grad():
-            test_outputs = model(X_test_tensor)
+            test_outputs = fold_model(X_test_tensor)
             test_probs = torch.softmax(test_outputs, dim=1).cpu().numpy()
             test_preds = np.argmax(test_probs, axis=1)
         
@@ -278,6 +346,17 @@ def weighted_voting_classification(model, weight_strategy='confidence', epochs=2
     
     if verbose:
         print(f"\nResults: {len(file_predictions)} worms, Acc: {accuracy:.3f}, F1: {f1:.3f}")
+        
+        # Per-class accuracy
+        class_0_mask = file_true_labels == 0
+        class_1_mask = file_true_labels == 1
+        class_0_acc = pytorch_accuracy(file_true_labels[class_0_mask], file_predictions[class_0_mask]) if class_0_mask.sum() > 0 else 0
+        class_1_acc = pytorch_accuracy(file_true_labels[class_1_mask], file_predictions[class_1_mask]) if class_1_mask.sum() > 0 else 0
+        
+        print(f"\nPer-Class Performance:")
+        print(f"  Class 0 (Control): {class_0_acc:.3f} ({class_0_mask.sum()} samples)")
+        print(f"  Class 1 (Treatment): {class_1_acc:.3f} ({class_1_mask.sum()} samples)")
+        
         print(f"\nWeighted Voting Analysis:")
         print(f"  Weighted accuracy: {vote_df['weighted_correct'].mean():.3f}")
         print(f"  Average confidence: {vote_df['weighted_confidence'].mean():.3f}")
@@ -293,31 +372,46 @@ def weighted_voting_classification(model, weight_strategy='confidence', epochs=2
     }
 
 
-
-
 if __name__ == "__main__":
 
-    model_name = 'LSTM'
+    model_name = 'CNN'
     weight_strategy = 'last_10_segments_confidence'
+    
+    # Feature selection: specify which features to use
+    # Options: ['x', 'y', 'speed', 'turning_angle']
+    # Examples:
+    #   None                            → use all 4 features
+    #   ['speed', 'turning_angle']      → use only speed and turning angle (2 features)
+    #   ['x', 'y']                      → use only coordinates (2 features)
+    # selected_features = None  # Use all features by default
+    selected_features = ['speed', 'turning_angle']
     
     print("===== Time Series Weighted Voting Classification =====")
     
-    # Get input size from data
-    loader = LPBSDataLoader()
-    X, _, _ = loader.load_segment_timeseries()
-    input_size = X[0].shape[1]  # Number of features (x, y, speed, turning_angle = 4)
+    # Get input size based on selected features
+    if selected_features is None:
+        input_size = 4  # All features: x, y, speed, turning_angle
+    else:
+        input_size = len(selected_features)
     
     print(f"Input size: {input_size} features")
+    if selected_features:
+        print(f"Using features: {selected_features}")
+    else:
+        print(f"Using all features: ['x', 'y', 'speed', 'turning_angle']")
     
     model = get_model(model_name, input_size)
     results = weighted_voting_classification(
         model, 
         weight_strategy=weight_strategy, 
-        epochs=25, 
+        epochs=30,  # Using 30 epochs with SMOTE balancing
         batch_size=32, 
         learning_rate=0.001,
+        features=selected_features,  # Pass selected features
         verbose=True
     )
+    print("\n===== Results =====")
     print("Accuracy:", results['accuracy'])
     print("F1:", results['f1'])
-    print("Confusion Matrix:", results['confusion_matrix'])
+    print("Confusion Matrix:")
+    print(results['confusion_matrix'])

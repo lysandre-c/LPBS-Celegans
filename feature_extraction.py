@@ -340,7 +340,16 @@ def calculate_turning_features(df, window_size=30, height_threshold=90):
     return features
 
 def calculate_higuchi_fd(x, k_max=10):
-    """Calculate Higuchi Fractal Dimension."""
+    """Calculate the Higuchi fractal dimension of a 1D signal.
+
+    Args:
+        x: 1D array-like signal.
+        k_max: Maximum k for the Higuchi algorithm (windowing scale).
+
+    Returns:
+        float: Estimated fractal dimension in [0, 2] (0 when insufficient
+        data or if computation fails).
+    """
     try:
         n = len(x)
         if n < 2 * k_max:  # Need sufficient data points
@@ -634,7 +643,18 @@ def calculate_frenetic_movement(df, window_size=10, overlap=5):
     return features
 
 def extract_all_features(df):
-    """Extract all features from a worm's time series data."""
+    """Extract a comprehensive set of movement features from a trajectory.
+
+    Aggregates basic, turning-related, entropy, wavelet, roaming/dwelling,
+    frenetic movement, and several enhanced physics/statistical/temporal/
+    frequency/behavioral state features.
+
+    Args:
+        df: DataFrame with at least `x`, `y`, `speed`, and `turning_angle`.
+
+    Returns:
+        dict: Mapping feature_name → value for the provided trajectory.
+    """
     features = {}
     
     # Original features
@@ -655,12 +675,15 @@ def extract_all_features(df):
     return features
 
 def process_all_files(input_dir, output_dir="feature_data"):
-    """
-    Process all preprocessed files and save features to output directory.
-    
+    """Process all preprocessed CSVs to compute features and write CSV outputs.
+
     Args:
-        input_dir (str): Base directory containing 'segments' and 'full' subdirectories
-        output_dir (str): Directory to save feature files
+        input_dir (str): Base directory containing 'segments' and 'full' subdirectories.
+        output_dir (str): Directory to save feature CSV files.
+
+    Returns:
+        bool: True if processing completed (files may still be skipped if
+        missing), False otherwise.
     """
     os.makedirs(output_dir, exist_ok=True)
     

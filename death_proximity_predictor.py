@@ -21,7 +21,6 @@ from sklearn.metrics import (roc_auc_score, f1_score, accuracy_score,
                            precision_recall_curve, roc_curve)
 from sklearn.model_selection import cross_val_score, StratifiedKFold
 from imblearn.over_sampling import SMOTE
-import joblib
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -94,125 +93,98 @@ class DeathProximityPredictor:
         Returns:
             X, y, groups: Features, labels, and worm groups
         """
-        print("Preparing death proximity prediction data...")
-        
-        # Extract segment index from filename if needed
-        if df['segment_index'].isna().all():
+        # Extract segment index if needed
+        if 'segment_index' not in df.columns or df['segment_index'].isna().all():
             df['segment_index'] = df['filename'].str.extract(r'segment(\d+(?:\.\d+)?)', expand=False).astype(float)
         
         # Calculate position from end for each worm
-        worm_stats = df.groupby('original_file')['segment_index'].max().reset_index()
-        worm_stats.columns = ['original_file', 'max_segment_index']
-        df = df.merge(worm_stats, on='original_file', how='left')
-        df['segments_from_end'] = df['max_segment_index'] - df['segment_index']
+        max_segments = df.groupby('original_file')['segment_index'].max()
+        df['segments_from_end'] = df.apply(
+            lambda row: max_segments[row['original_file']] - row['segment_index'], axis=1
+        )
         
         # Create death proximity labels
         df['close_to_death'] = (df['segments_from_end'] <= self.proximity_threshold).astype(int)
         
-        print(f"Segments close to death (≤{self.proximity_threshold} segments from end): {df['close_to_death'].sum()}")
-        print(f"Segments not close to death: {len(df) - df['close_to_death'].sum()}")
-        print(f"Class balance: {df['close_to_death'].mean():.3f} positive rate")
-        
         # Select features
         if self.use_top_features:
-            available_features = [f for f in self.top_aging_features if f in df.columns]
-            print(f"Using {len(available_features)} top aging-related features")
+            features = [f for f in self.top_aging_features if f in df.columns]
         else:
             metadata_cols = ['label', 'filename', 'relative_path', 'file', 'worm_id', 'segment_number', 
                            'segment_index', 'original_file', 'max_segment_index', 'segments_from_end', 'close_to_death']
-            available_features = [col for col in df.columns if col not in metadata_cols and df[col].dtype in ['float64', 'int64']]
-            print(f"Using all {len(available_features)} available features")
+            features = [col for col in df.columns if col not in metadata_cols and df[col].dtype in ['float64', 'int64']]
         
-        self.feature_names = available_features
+        self.feature_names = features
         
-        # Prepare feature matrix
-        X = df[available_features].copy()
-        y = df['close_to_death'].copy()
-        groups = df['original_file'].copy()
+        # Print summary
+        pos_count = df['close_to_death'].sum()
+        print(f"Data prepared: {len(df)} segments, {len(features)} features")
+        print(f"  Close to death: {pos_count} ({df['close_to_death'].mean():.3f})")
+        print(f"  Not close: {len(df) - pos_count}")
         
-        # Handle missing values
-        X = X.fillna(X.median())
+        # Prepare feature matrix and handle missing values
+        X = df[features].fillna(df[features].median())
+        y = df['close_to_death']
+        groups = df['original_file']
         
         return X, y, groups
     
     
-    def train_model(self, X, y, groups, model_name='RandomForest', use_smote=True, 
-                   cv_folds=5, verbose=True):
+    def train_model(self, X, y, model_name='RandomForest', use_smote=True, verbose=True):
         """
         Train the death proximity prediction model.
         
         Args:
             X: Feature matrix
             y: Labels
-            groups: Worm groups for proper cross-validation
             model_name: Type of model to use
             use_smote: Whether to use SMOTE for class balancing
-            cv_folds: Number of cross-validation folds
             verbose: Print training progress
         """
-        print(f"Training {model_name} model for death proximity prediction...")
+        if verbose:
+            print(f"Training {model_name}...")
         
         # Update feature names
-        self.feature_names = X.columns.tolist()
-        
-        if verbose:
-            print(f"Total features: {len(self.feature_names)}")
+        self.feature_names = X.columns.tolist() if hasattr(X, 'columns') else list(range(X.shape[1]))
         
         # Create model pipeline
-        if model_name == 'RandomForest':
-            model = Pipeline([
-                ('scaler', StandardScaler()),
-                ('classifier', RandomForestClassifier(
-                    n_estimators=200,
-                    max_depth=10,
-                    min_samples_split=10,
-                    min_samples_leaf=5,
-                    random_state=42,
-                    class_weight='balanced'
-                ))
-            ])
-        elif model_name == 'GradientBoosting':
-            model = Pipeline([
-                ('scaler', StandardScaler()),
-                ('classifier', GradientBoostingClassifier(
-                    n_estimators=200,
-                    learning_rate=0.1,
-                    max_depth=6,
-                    random_state=42
-                ))
-            ])
-        elif model_name == 'LogisticRegression':
-            model = Pipeline([
-                ('scaler', StandardScaler()),
-                ('classifier', LogisticRegression(
-                    random_state=42,
-                    class_weight='balanced',
-                    max_iter=1000
-                ))
-            ])
-        elif model_name == 'MLP':
-            model = Pipeline([
-                ('scaler', StandardScaler()),
-                ('classifier', MLPClassifier(
-                    hidden_layer_sizes=(100, 100, 50),
-                    random_state=42,
-                    max_iter=500
-                ))
-            ])
+        model_configs = {
+            'RandomForest': RandomForestClassifier(
+                n_estimators=200, max_depth=10, min_samples_split=10,
+                min_samples_leaf=5, random_state=42, class_weight='balanced'
+            ),
+            'GradientBoosting': GradientBoostingClassifier(
+                n_estimators=200, learning_rate=0.05, max_depth=6, random_state=42
+            ),
+            'LogisticRegression': LogisticRegression(
+                random_state=42, class_weight='balanced', max_iter=1000
+            ),
+            'MLP': MLPClassifier(
+                hidden_layer_sizes=(256, 256, 64), random_state=42, max_iter=500
+            )
+        }
+        
+        model = Pipeline([
+            ('scaler', StandardScaler()),
+            ('classifier', model_configs[model_name])
+        ])
+        
+        # Convert to numpy arrays
+        X_array = X.values if hasattr(X, 'values') else X
+        y_array = y.values if hasattr(y, 'values') else y
         
         # Apply SMOTE if requested
         if use_smote:
-            print("Applying SMOTE for class balancing...")
-            smote = SMOTE(random_state=42)
-            X_resampled, y_resampled = smote.fit_resample(X, y)
             if verbose:
-                print(f"After SMOTE: {len(X_resampled)} samples, positive rate: {y_resampled.mean():.3f}")
-        else:
-            X_resampled, y_resampled = X, y
+                print(f"  Before SMOTE: {len(X)} samples, positive rate: {y_array.mean():.3f}")
+            smote = SMOTE(random_state=42)
+            X_array, y_array = smote.fit_resample(X_array, y_array)
+            if verbose:
+                print(f"  After SMOTE: {len(X_array)} samples, positive rate: {y_array.mean():.3f}")
         
         # Train model
         self.model = model
-        self.model.fit(X_resampled, y_resampled)
+        self.model.fit(X_array, y_array)
         
         # Get feature importance if available
         if hasattr(self.model.named_steps['classifier'], 'feature_importances_'):
@@ -220,62 +192,90 @@ class DeathProximityPredictor:
                 'feature': self.feature_names,
                 'importance': self.model.named_steps['classifier'].feature_importances_
             }).sort_values('importance', ascending=False)
-        
-        # Cross-validation evaluation
-        print("Performing cross-validation...")
-        cv_scores = cross_val_score(model, X, y, cv=cv_folds, scoring='roc_auc')
-        
-        if verbose:
-            print(f"Cross-validation AUC: {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
-        
-        return cv_scores
     
-    def evaluate_model(self, X, y, plot_results=True):
+    def find_optimal_threshold(self, X_val, y_val):
+        """
+        Find optimal probability threshold to maximize a given metric on validation set.
+        
+        Args:
+            X_val: Validation feature matrix
+            y_val: Validation true labels
+            
+        Returns:
+            float: Optimal threshold value
+        """
+        if self.model is None:
+            raise ValueError("Model not trained yet. Call train_model first.")
+        
+        # Get predicted probabilities
+        y_pred_proba = self.model.predict_proba(X_val)[:, 1]
+        
+        # Try different thresholds
+        thresholds = np.linspace(0.01, 0.99, 99)
+        best_score = 0
+        best_threshold = 0.5
+        
+        for threshold in thresholds:
+            y_pred_thresh = (y_pred_proba >= threshold).astype(int)
+                
+            score = f1_score(y_val, y_pred_thresh)
+            
+            if score > best_score:
+                best_score = score
+                best_threshold = threshold
+        
+        return best_threshold
+    
+    def evaluate_model(self, X, y, optimal_threshold=None, plot_results=False, verbose=True):
         """
         Evaluate the trained model.
         
         Args:
             X: Feature matrix
             y: True labels
+            optimal_threshold: Custom decision threshold (if None, uses 0.5)
             plot_results: Whether to create evaluation plots
+            verbose: Whether to print detailed results
         """
         if self.model is None:
             raise ValueError("Model not trained yet. Call train_model first.")
         
-        # Predictions
-        y_pred = self.model.predict(X)
+        # Get probabilities
         y_pred_proba = self.model.predict_proba(X)[:, 1]
         
-        # Metrics
-        accuracy = accuracy_score(y, y_pred)
-        auc = roc_auc_score(y, y_pred_proba)
-        f1 = f1_score(y, y_pred)
+        # Apply threshold
+        if optimal_threshold is None:
+            optimal_threshold = 0.5
+        y_pred = (y_pred_proba >= optimal_threshold).astype(int)
         
-        print("="*60)
-        print("MODEL EVALUATION RESULTS")
-        print("="*60)
-        print(f"Accuracy: {accuracy:.3f}")
-        print(f"AUC-ROC: {auc:.3f}")
-        print(f"F1-Score: {f1:.3f}")
-        print()
+        # Calculate metrics
+        results = {
+            'accuracy': accuracy_score(y, y_pred),
+            'auc': roc_auc_score(y, y_pred_proba),
+            'f1': f1_score(y, y_pred),
+            'predictions': y_pred,
+            'probabilities': y_pred_proba,
+            'threshold': optimal_threshold
+        }
         
-        print("Classification Report:")
-        print(classification_report(y, y_pred, target_names=['Not Close to Death', 'Close to Death']))
-        
-        print("\nConfusion Matrix:")
-        cm = confusion_matrix(y, y_pred)
-        print(cm)
+        if verbose:
+            print("="*60)
+            print("MODEL EVALUATION RESULTS")
+            print("="*60)
+            print(f"Decision Threshold: {optimal_threshold:.3f}")
+            print(f"Accuracy: {results['accuracy']:.3f}")
+            print(f"AUC-ROC: {results['auc']:.3f}")
+            print(f"F1-Score: {results['f1']:.3f}")
+            print()
+            print("Classification Report:")
+            print(classification_report(y, y_pred, target_names=['Not Close to Death', 'Close to Death']))
+            print("\nConfusion Matrix:")
+            print(confusion_matrix(y, y_pred))
         
         if plot_results:
             self._plot_evaluation_results(y, y_pred, y_pred_proba)
         
-        return {
-            'accuracy': accuracy,
-            'auc': auc,
-            'f1': f1,
-            'predictions': y_pred,
-            'probabilities': y_pred_proba
-        }
+        return results
     
     def _plot_evaluation_results(self, y_true, y_pred, y_pred_proba):
         """Create evaluation plots."""
@@ -343,34 +343,6 @@ class DeathProximityPredictor:
             return self.model.predict_proba(X)[:, 1]
         else:
             return self.model.predict(X)
-    
-    def save_model(self, filepath='death_proximity_model.joblib'):
-        """Save the trained model."""
-        if self.model is None:
-            raise ValueError("No model to save. Train the model first.")
-        
-        model_data = {
-            'model': self.model,
-            'feature_names': self.feature_names,
-            'feature_importance': self.feature_importance,
-            'proximity_threshold': self.proximity_threshold,
-            'top_aging_features': self.top_aging_features
-        }
-        
-        joblib.dump(model_data, filepath)
-        print(f"Model saved to: {filepath}")
-    
-    def load_model(self, filepath='death_proximity_model.joblib'):
-        """Load a trained model."""
-        model_data = joblib.load(filepath)
-        
-        self.model = model_data['model']
-        self.feature_names = model_data['feature_names']
-        self.feature_importance = model_data['feature_importance']
-        self.proximity_threshold = model_data['proximity_threshold']
-        self.top_aging_features = model_data['top_aging_features']
-        
-        print(f"Model loaded from: {filepath}")
 
 def analyze_death_risk_by_segment_position(df, predictor):
     """
@@ -379,6 +351,10 @@ def analyze_death_risk_by_segment_position(df, predictor):
     Args:
         df: DataFrame with segments and predictions
         predictor: Trained DeathProximityPredictor
+    
+    Returns:
+        pandas.DataFrame: Aggregated statistics of death risk by life stage
+        bins with columns ['life_stage','mean','std','count'].
     """
     # Work with a copy to avoid modifying the original
     df_analysis = df.copy()
@@ -460,13 +436,15 @@ def main(proximity_threshold, model_name):
     Args:
         proximity_threshold: Number of segments from end to consider "close to death"
     """
+    from data_loader import LPBSDataLoader
+    
     print("="*80)
     print("C. ELEGANS DEATH PROXIMITY PREDICTION")
     print("="*80)
     print(f"Proximity threshold: {proximity_threshold} segments from end")
     print()
     
-    # Load data
+    # Load data using LPBSDataLoader
     print("Loading segment features data...")
     df = pd.read_csv('feature_data/segments_features.csv')
     
@@ -479,78 +457,60 @@ def main(proximity_threshold, model_name):
     # Prepare data
     X, y, groups = predictor.prepare_data(df)
     
-    # Train model
-    print("\nTraining death proximity prediction model...")
-    cv_scores = predictor.train_model(X, y, groups, model_name=model_name, use_smote=True)
+    # Create CV splits using LPBSDataLoader's file-based splitting
+    loader = LPBSDataLoader()
+    cv_splits = loader.create_cv_splits(X, y, groups, n_splits=5)
     
-    # Evaluate model
-    print("\nEvaluating model performance...")
-    results = predictor.evaluate_model(X, y, plot_results=True)
-    
-    # Save model with threshold in filename
-    model_filename = f'death_proximity_model_threshold_{proximity_threshold}.joblib'
-    predictor.save_model(model_filename)
-    
-    # Analyze death risk by segment position
-    print("\nAnalyzing death risk by segment position...")
-    stage_analysis = analyze_death_risk_by_segment_position(df, predictor)
-    
-    print("\n" + "="*80)
-    print("ANALYSIS COMPLETE")
+    # Evaluate across all CV folds
+    print(f"\nEvaluating across {len(cv_splits)} CV folds...")
     print("="*80)
-    print("Files generated:")
-    print(f"- {model_filename}")
     
-    return predictor, results
+    fold_results = []
+    
+    for fold_idx, fold in enumerate(cv_splits):
+        print(f"\nFold {fold_idx + 1}/{len(cv_splits)}:")
+        print(f"  Train: {len(fold['X_train'])} segments from {len(fold['train_files'])} files")
+        print(f"  Test:  {len(fold['X_test'])} segments from {len(fold['test_files'])} files")
+        
+        # Create and train fold predictor
+        fold_predictor = DeathProximityPredictor(proximity_threshold, use_top_features=True)
+        fold_predictor.feature_names = predictor.feature_names
+        
+        fold_predictor.train_model(
+            fold['X_train'], fold['y_train'], 
+            model_name=model_name, use_smote=True, verbose=(fold_idx == 0)
+        )
+        
+        # Evaluate on test set
+        results = fold_predictor.evaluate_model(fold['X_test'], fold['y_test'], verbose=False)
+        fold_results.append(results)
+        
+        print(f"    Accuracy: {results['accuracy']:.3f}, AUC: {results['auc']:.3f}, F1: {results['f1']:.3f}")
+    
+    # Calculate average metrics across folds
+    metrics = {
+        'accuracy': [r['accuracy'] for r in fold_results],
+        'auc': [r['auc'] for r in fold_results],
+        'f1': [r['f1'] for r in fold_results]
+    }
+    
+    avg_metrics = {k: np.mean(v) for k, v in metrics.items()}
+    std_metrics = {k: np.std(v) for k, v in metrics.items()}
+    
+    # Print summary
+    print("\n" + "="*80)
+    print("CROSS-VALIDATION RESULTS (Test Set Performance)")
+    print("="*80)
+    print(f"Accuracy:  {avg_metrics['accuracy']:.3f} ± {std_metrics['accuracy']:.3f}")
+    print(f"AUC-ROC:   {avg_metrics['auc']:.3f} ± {std_metrics['auc']:.3f}")
+    print(f"F1-Score:  {avg_metrics['f1']:.3f} ± {std_metrics['f1']:.3f}")
+
+    return {
+        'fold_results': fold_results,
+        'avg_metrics': avg_metrics,
+        'std_metrics': std_metrics
+    }
 
 if __name__ == "__main__":
-    #main(proximity_threshold=20, model_name='RandomForest') #Accuracy: 0.833 AUC-ROC: 0.918 F1-Score: 0.739
+    #main(proximity_threshold=20, model_name='RandomForest')
     main(proximity_threshold=20, model_name='MLP')
-
-# with RandomForest
-#================================================================================
-#THRESHOLD COMPARISON SUMMARY
-#================================================================================
-#Threshold  Pos Rate   CV AUC          Accuracy   Test AUC   F1 Score  
-#------------------------------------------------------------------------------------------
-#1          0.025      0.834±0.017     0.868      0.961      0.256    
-#3          0.050      0.829±0.012     0.813      0.941      0.332   
-#5          0.075      0.832±0.024     0.813      0.930      0.422   
-#10         0.137      0.836±0.023     0.830      0.931      0.601     
-#15         0.198      0.830±0.029     0.836      0.926      0.690     
-#20         0.261      0.822±0.031     0.833      0.918      0.739    
-#25         0.322      0.823±0.027     0.836      0.918      0.777      
-#30         0.385      0.819±0.023     0.836      0.916      0.801     
-#40         0.511      0.804±0.018     0.823      0.910      0.822
-
-
-# with MLP
-#================================================================================
-#THRESHOLD COMPARISON SUMMARY
-#================================================================================
-#Threshold  Pos Rate   CV AUC          Accuracy   Test AUC   F1 Score  
-#------------------------------------------------------------------------------------------
-#1          0.025      0.814±0.018     0.995      0.999      0.898     
-#3          0.050      0.793±0.019     0.984      0.997      0.857     
-#5          0.075      0.787±0.023     0.980      0.998      0.882     
-#10         0.137      0.771±0.031     0.933      0.989      0.802     
-#15         0.198      0.768±0.028     0.943      0.988      0.869     
-#20         0.261      0.740±0.026     0.963      0.993      0.930     
-#30         0.385      0.732±0.030     0.938      0.986      0.922     
-#25         0.322      0.731±0.016     0.938      0.985      0.909     
-#40         0.511      0.700±0.030     0.952      0.990      0.953
-
-
-# with GradientBoosting
-#================================================================================
-#Threshold  Pos Samples  Pos Rate   CV AUC          Accuracy   Test AUC   F1 Score  
-#------------------------------------------------------------------------------------------
-#1          206          0.025      0.815±0.022     0.999      1.000      0.980     
-#3          412          0.050      0.815±0.021     0.996      1.000      0.964     
-#5          615          0.075      0.811±0.018     0.986      0.998      0.913  
-#10         1126         0.137      0.817±0.023     0.970      0.995      0.899     
-#15         1627         0.198      0.809±0.026     0.958      0.989      0.898    
-#20         2136         0.261      0.802±0.024     0.951      0.988      0.908    
-#25         2643         0.322      0.810±0.022     0.943      0.986      0.913     
-#30         3159         0.385      0.803±0.024     0.939      0.986      0.921     
-#40         4186         0.511      0.787±0.019     0.945      0.989      0.945

@@ -265,6 +265,8 @@ class FeatureImportanceAnalyzer:
         print(f"\nTop 10 most important features:")
         for i, (_, row) in enumerate(combined_importance.head(10).iterrows(), 1):
             print(f"{i:2d}. {row['feature'][:40]} (score: {row['combined_score']:.3f})")
+
+        print(combined_importance)
         
         return {
             'importance_df': combined_importance,

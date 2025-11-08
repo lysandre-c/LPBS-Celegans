@@ -21,6 +21,15 @@ def cap_extreme_speeds(df, max_speed=MAX_SPEED_THRESHOLD):
     return df
 
 def calculate_turning_angle(df):
+    """Compute per-frame turning angle in degrees.
+
+    Args:
+        df: DataFrame with at least `x` and `y` columns.
+
+    Returns:
+        pandas.DataFrame: Same dataframe with a `turning_angle` column in degrees
+        added (first and last frames set to 0 if available).
+    """
     if len(df) < 3 or 'x' not in df.columns or 'y' not in df.columns:
         df['turning_angle'] = 0
         return df
@@ -39,6 +48,17 @@ def calculate_turning_angle(df):
     return df
 
 def split_into_segments(df):
+    """Split a trajectory dataframe into a list of per-segment dataframes.
+
+    Expects a `segment` column marking segment membership.
+
+    Args:
+        df: DataFrame containing a `segment` column.
+
+    Returns:
+        list[pandas.DataFrame]: One dataframe per unique segment with a
+        `segment_index` column added.
+    """
     segments = []
     for segment_id in sorted(df['segment'].unique()):
         segment_df = df[df['segment'] == segment_id].copy()
@@ -48,6 +68,16 @@ def split_into_segments(df):
     return segments
 
 def clean_segment_gaps(segment_df):
+    """Repair short gaps by interpolation and remove long gaps.
+
+    Args:
+        segment_df: DataFrame of a single segment containing columns `x`, `y`,
+            and `speed` where gaps may be NaN.
+
+    Returns:
+        pandas.DataFrame: Cleaned segment dataframe with short gaps interpolated
+        and rows from long gaps removed.
+    """
     gap_mask = segment_df['x'].isna()
     is_nan = gap_mask.astype(int)
     starts = (is_nan.diff() == 1).astype(int)
@@ -99,6 +129,12 @@ def normalize_trajectory_data(df):
 _lifespan_data_cache = None
 
 def load_lifespan_data():
+    """Load and cache lifespan summary metadata.
+
+    Returns:
+        pandas.DataFrame: Cached dataframe loaded from
+        `data/Lifespan/lifespan_summary.csv`.
+    """
     global _lifespan_data_cache
     if _lifespan_data_cache is None:
         _lifespan_data_cache = pd.read_csv('data/Lifespan/lifespan_summary.csv')
@@ -106,6 +142,15 @@ def load_lifespan_data():
     return _lifespan_data_cache
 
 def extract_file_pattern_from_path(file_path):
+    """Extract the canonical filename pattern used in lifespan metadata.
+
+    Args:
+        file_path: Absolute or relative path to a raw CSV file.
+
+    Returns:
+        str | None: A pattern like `/<YYYYMMDD>_piworm<NN>_<recording>` if the
+        filename matches the expected convention, otherwise None.
+    """
     filename = os.path.basename(file_path)
     
     if 'coordinates_highestspeed_' in filename:
@@ -119,6 +164,21 @@ def extract_file_pattern_from_path(file_path):
     return None
 
 def preprocess_data(file_path, full_output_dir, segments_output_dir):
+    """Preprocess a raw trajectory file into full and segmented outputs.
+
+    Steps include capping speeds, computing turning angles, cleaning gaps,
+    clipping to pre-death segments, normalization, and exporting CSVs.
+
+    Args:
+        file_path: Path to raw CSV input file.
+        full_output_dir: Directory to write the full preprocessed CSV.
+        segments_output_dir: Directory to write segment CSVs.
+
+    Returns:
+        tuple[list[tuple[str, int]] | None, list[tuple[str, int]] | None]:
+        A pair of lists with (output_path, death_segment) for full and segment
+        outputs respectively. Returns (None, None) if no lifespan match found.
+    """
     # find matching line in lifespan_summary.csv
     lifespan_df = load_lifespan_data()
     file_pattern = extract_file_pattern_from_path(file_path)
@@ -181,6 +241,18 @@ def preprocess_data(file_path, full_output_dir, segments_output_dir):
 
 
 def process_directory(input_dir, output_dir):
+    """Preprocess all raw CSVs under a directory tree.
+
+    Traverses subdirectories (excluding some), preprocesses each file into
+    full and segmented CSVs, and writes `labels_and_metadata.csv` for both.
+
+    Args:
+        input_dir: Base directory containing raw CSV files under treatments.
+        output_dir: Base output directory for `full/` and `segments/` results.
+
+    Returns:
+        None
+    """
     segments_output_dir = os.path.join(output_dir, "segments")
     full_output_dir = os.path.join(output_dir, "full")
     os.makedirs(segments_output_dir, exist_ok=True)

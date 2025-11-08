@@ -4,6 +4,8 @@
 
 This project implements a comprehensive machine learning pipeline for analyzing movement patterns of *Caenorhabditis elegans* worms tracked on plates. The system can classify worms that have been administered drugs versus control worms and predict death proximity.
 
+**📖 For detailed methodology, architecture decisions, and data leakage prevention strategies, see [METHODOLOGY.md](METHODOLOGY.md)**
+
 ## Project Architecture
 
 ```
@@ -41,7 +43,8 @@ LPBS/
 │
 ├── 📄 feature_segment_classification.py  # Feature-based ML models
 ├── 📄 ts_segment_classification.py      # Time series ML models (CNN/LSTM)
-├── 📄 death_proximity_predictor.py      # Death prediction model
+├── 📄 death_proximity_predictor.py      # Death classification (binary)
+├── 📄 death_proximity_regressor.py      # Death regression (segments remaining)
 │
 ├── 📄 Analysis & Utilities
 ├── 📄 feature_importance_analysis.py    # Feature selection analysis
@@ -86,8 +89,11 @@ python ts_segment_classification.py
 
 #### Death Proximity Prediction
 ```bash
-# Predict when worms are close to death
+# Classify segments as "close to death" or not (binary classification)
 python death_proximity_predictor.py
+
+# Predict number of segments remaining until death (regression)
+python death_proximity_regressor.py
 ```
 
 ## Core Components
@@ -143,10 +149,11 @@ python death_proximity_predictor.py
 from data_loader import LPBSDataLoader
 
 loader = LPBSDataLoader()
-X, y, groups = loader.load_segment_features_with_custom_labels(
-    labeling_strategy="death_proximity",
-    proximity_threshold=10
-)
+X, y, groups = loader.load_segment_features()  # worm-level groups inside
+folds = loader.create_cv_splits(X, y, groups, n_splits=5)
+
+for fold in folds:
+    ...
 ```
 
 ## Machine Learning Models
@@ -185,9 +192,24 @@ LSTM(128, num_layers=2) → Dense(2)
 
 **Input Features**: 4D time series (x, y, speed, turning_angle)
 
-### 3. Death Proximity Prediction (`death_proximity_predictor.py`)
+### 3. Death Proximity Models
 
-**Purpose**: Predict when a worm is approaching death based on movement patterns
+#### Binary Classification (`death_proximity_predictor.py`)
+
+**Purpose**: Classify segments as "close to death" (last N segments) or "far from death"
+
+**Model Performance**: See detailed results at the end of the file
+
+#### Regression (`death_proximity_regressor.py`)
+
+**Purpose**: Predict the continuous number of segments remaining until death
+
+**Target Types**:
+- `segments_from_end`: Number of segments remaining (interpretable)
+- `life_percentage_remaining`: Percentage of life remaining (0-100%)
+- `normalized_position`: Normalized position from death (0-1)
+
+**Model Performance**: ~16% of life_percentage_remaining (MAE with cross-validation)
 
 **Model Performance**:
 see at the end of the file
