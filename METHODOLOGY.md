@@ -1,26 +1,13 @@
 # LPBS Methodology & Architecture Documentation
 
 ## Table of Contents
-1. [Overview](#overview)
-2. [Data Flow Pipeline](#data-flow-pipeline)
-3. [Preventing Data Leakage](#preventing-data-leakage)
-4. [Cross-Validation Strategy](#cross-validation-strategy)
-5. [Model Architectures](#model-architectures)
-6. [Evaluation Methodology](#evaluation-methodology)
-7. [Design Choices & Rationale](#design-choices--rationale)
-8. [Validation & Verification](#validation--verification)
-
----
-
-## Overview
-
-### Research Questions
-
-This pipeline addresses three main research questions:
-
-1. **Drug Treatment Classification**: Can we identify if individual worms or populations were administered drugs based solely on movement patterns?
-
-2. **Aging Analysis / Death Proximity Prediction**: How do movement patterns change as worms age? Can we predict when a worm is approaching death? Can we estimate how many days/segments remain?
+1. [Data Flow Pipeline](#data-flow-pipeline)
+2. [Preventing Data Leakage](#preventing-data-leakage)
+3. [Cross-Validation Strategy](#cross-validation-strategy)
+4. [Model Architectures](#model-architectures)
+5. [Evaluation Methodology](#evaluation-methodology)
+6. [Design Choices & Rationale](#design-choices--rationale)
+7. [Validation & Verification](#validation--verification)
 
 ---
 

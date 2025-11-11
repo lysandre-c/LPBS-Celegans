@@ -27,7 +27,6 @@ class DeathProximityRegressor:
             target_type: Type of target to predict:
                 - 'segments_from_end': Number of segments remaining (default)
                 - 'life_percentage_remaining': Percentage of life remaining (0-100)
-                - 'normalized_position': Normalized position from death (0-1)
         """
         self.use_top_features = use_top_features
         self.target_type = target_type
@@ -91,15 +90,12 @@ class DeathProximityRegressor:
         df['max_segment_index'] = df['original_file'].map(max_segments)
         df['life_percentage'] = (df['segment_index'] / df['max_segment_index']) * 100
         df['life_percentage_remaining'] = 100 - df['life_percentage']
-        df['normalized_position_from_death'] = df['segments_from_end'] / df['max_segment_index']
         
         # Select target based on target_type
         if self.target_type == 'segments_from_end':
             target_col = 'segments_from_end'
         elif self.target_type == 'life_percentage_remaining':
             target_col = 'life_percentage_remaining'
-        elif self.target_type == 'normalized_position':
-            target_col = 'normalized_position_from_death'
         else:
             raise ValueError(f"Unknown target_type: {self.target_type}")
         
@@ -109,7 +105,7 @@ class DeathProximityRegressor:
         else:
             metadata_cols = ['label', 'filename', 'relative_path', 'file', 'worm_id', 'segment_number', 
                            'segment_index', 'original_file', 'max_segment_index', 'segments_from_end',
-                           'life_percentage', 'life_percentage_remaining', 'normalized_position_from_death']
+                           'life_percentage', 'life_percentage_remaining']
             features = [col for col in df.columns if col not in metadata_cols and df[col].dtype in ['float64', 'int64']]
         
         self.feature_names = features
@@ -225,8 +221,6 @@ class DeathProximityRegressor:
             target_label = 'Segments from End'
         elif self.target_type == 'life_percentage_remaining':
             target_label = 'Life Percentage Remaining (%)'
-        elif self.target_type == 'normalized_position':
-            target_label = 'Normalized Position from Death'
         else:
             target_label = 'Target Value'
         
@@ -360,8 +354,6 @@ def main(model_name='RandomForest', target_type='segments_from_end', use_top_fea
         unit_label = 'segments'
     elif target_type == 'life_percentage_remaining':
         unit_label = '%'
-    elif target_type == 'normalized_position':
-        unit_label = 'units'
     else:
         unit_label = 'units'
     
@@ -399,8 +391,6 @@ def _plot_cv_results(fold_results, df, target_type='segments_from_end'):
         target_label = 'Segments from End'
     elif target_type == 'life_percentage_remaining':
         target_label = 'Life Percentage Remaining (%)'
-    elif target_type == 'normalized_position':
-        target_label = 'Normalized Position from Death'
     else:
         target_label = 'Target Value'
     
@@ -461,22 +451,13 @@ if __name__ == "__main__":
     print("="*80)
     results2 = main(model_name='RandomForest', target_type='life_percentage_remaining', use_top_features=True)
     
-    print("\n" + "="*80)
-    print("TESTING RANDOM FOREST REGRESSOR - TOP FEATURES")
-    print("="*80)
-    results3 = main(model_name='RandomForest', target_type='normalized_position', use_top_features=True)
+    print(f"\nSegments from end - MAE:   {results1['avg_metrics']['mae']:.3f} ± {results1['std_metrics']['mae']:.3f} segments")
+    print(f"Segments from end - RMSE:  {results1['avg_metrics']['rmse']:.3f} ± {results1['std_metrics']['rmse']:.3f} segments")
+    print(f"Segments from end - R²:    {results1['avg_metrics']['r2']:.3f} ± {results1['std_metrics']['r2']:.3f}")
     
-    print(f"MAE:   {results1['avg_metrics']['mae']:.3f} ± {results1['std_metrics']['mae']:.3f} units")
-    print(f"RMSE:  {results1['avg_metrics']['rmse']:.3f} ± {results1['std_metrics']['rmse']:.3f} units")
-    print(f"R²:    {results1['avg_metrics']['r2']:.3f} ± {results1['std_metrics']['r2']:.3f}")
-    
-    print(f"MAE:   {results2['avg_metrics']['mae']:.3f} ± {results2['std_metrics']['mae']:.3f} %")
-    print(f"RMSE:  {results2['avg_metrics']['rmse']:.3f} ± {results2['std_metrics']['rmse']:.3f} %")
-    print(f"R²:    {results2['avg_metrics']['r2']:.3f} ± {results2['std_metrics']['r2']:.3f}")
-    
-    print(f"MAE:   {results3['avg_metrics']['mae']:.3f} ± {results3['std_metrics']['mae']:.3f} units")
-    print(f"RMSE:  {results3['avg_metrics']['rmse']:.3f} ± {results3['std_metrics']['rmse']:.3f} units")
-    print(f"R²:    {results3['avg_metrics']['r2']:.3f} ± {results3['std_metrics']['r2']:.3f}")
+    print(f"\nLife percentage - MAE:   {results2['avg_metrics']['mae']:.3f} ± {results2['std_metrics']['mae']:.3f} %")
+    print(f"Life percentage - RMSE:  {results2['avg_metrics']['rmse']:.3f} ± {results2['std_metrics']['rmse']:.3f} %")
+    print(f"Life percentage - R²:    {results2['avg_metrics']['r2']:.3f} ± {results2['std_metrics']['r2']:.3f}")
     
     # Uncomment to test other models:
     # print("\n" + "="*80)
@@ -492,4 +473,3 @@ if __name__ == "__main__":
 
 # - 'segments_from_end': Number of segments remaining (default)
 # - 'life_percentage_remaining': Percentage of life remaining (0-100)
-# - 'normalized_position': Normalized position from death (0-1)
